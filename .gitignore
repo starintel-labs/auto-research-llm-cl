@@ -1,0 +1,8 @@
+# nix build output
+/result
+# direnv
+.direnv/
+# runtime event log (regenerable projection; ledgers stay tracked)
+.ar-events.jsonl
+# local env with real tokens
+.env
