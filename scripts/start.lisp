@@ -27,6 +27,8 @@
 
 (in-package :starintel-auto-research)
 
+;; the same env accessor, now inside the runtime package (the earlier
+;; CL-USER copy is used by the source-registry init above)
 (defun ar-env (name default)
   (let ((value (uiop:getenv name)))
     (if (and value (plusp (length value))) value default)))
@@ -72,17 +74,7 @@ local development only."
                    :provider (build-provider)
                    :operator "auto-research-local"))
 
-(let ((operator-token (ar-env "AR_OPERATOR_TOKEN" "dev-operator-token"))
-      (readonly-token (ar-env "AR_READONLY_TOKEN" "dev-readonly")))
-  (starintel-auto-research-web:configure-principal
-   operator-token
-   (research-core:make-principal
-    "operator"
-    (list :|research:read| :|research:submit| :|research:cancel|
-          :|research:approve| :|design:approve| :|runtime:inspect|)))
-  (starintel-auto-research-web:configure-principal
-   readonly-token
-   (research-core:make-principal "readonly" (list :|research:read|))))
+(configure-principals)
 
 (setf starintel-auto-research-web:*runtime* *runtime*)
 

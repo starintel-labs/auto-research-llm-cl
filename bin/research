@@ -1,0 +1,312 @@
+#!/usr/bin/env bash
+# research --- launcher for the local Auto Research runtime.
+#
+# Canonical usage:
+#
+#   research -p PROJECT <file>       submit the file's text, project explicit
+#   research -p PROJECT "question"   submit a quoted question
+#   research -p PROJECT topic words  multiple words are joined into a question
+#   research "question"              free text under the default project
+#   research <file>                  file text under the default project
+#   research                         REPL mode
+#   research start|stop|restart|logs|projects
+#
+# Contract (deterministic, no silent reinterpretation):
+#   - Exactly one positional argument that names an existing file is read
+#     as the question; the project comes from -p/--project or the default.
+#   - Multiple positional arguments are free text. If ANY positional
+#     argument names an existing file in that case, the invocation is
+#     ambiguous (e.g. `research star-lang prompts/star-lang/bounder.md`)
+#     and FAILS instead of being submitted as a literal question.
+#   - The project must exist. Unknown project ids fail clearly before
+#     submission; there is no fallback to a default project on error.
+#   - Before submission the resolved project-id, input-kind
+#     (file | text), input-path, and question are printed and retained
+#     as request provenance.
+#
+# REPL commands: research, runs, status, events, search, open,
+# approve, promote, projects, stop, help, quit
+set -euo pipefail
+
+CORPUS="${AR_CORPUS_ROOT:-$HOME/starintel/auto-research-llm-cl}"
+PIDFILE="$HOME/.cache/auto-research/daemon.pid"
+LOGFILE="$HOME/.cache/auto-research/daemon.log"
+DEFAULT_PROJECT="${AR_DEFAULT_PROJECT:-auto-research}"
+
+load-env() {
+  if [ -f "$CORPUS/.env" ]; then set -a; . "$CORPUS/.env"; set +a; fi
+  PORT="${AR_WEB_PORT:-8080}"
+  TOKEN="${AR_OPERATOR_TOKEN:-dev-operator-token}"
+  API="http://127.0.0.1:$PORT/api/v1"
+}
+
+server-up() { curl -s -m 2 -o /dev/null "$API/health"; }
+
+server-start() {
+  if server-up; then return 0; fi
+  mkdir -p "$(dirname "$PIDFILE")"
+  echo "auto-research: starting daemon (corpus $CORPUS)..."
+  ( cd "$CORPUS" && set -a && . ./.env 2>/dev/null; set +a
+    nohup sbcl --noinform --script scripts/start.lisp >> "$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE" )
+  local i
+  for i in $(seq 1 90); do
+    sleep 1
+    if curl -s -m 2 -o /dev/null "$API/health"; then
+      echo "auto-research: API ready on $API"
+      return 0
+    fi
+  done
+  echo "auto-research: server failed to start; see $LOGFILE" >&2
+  tail -15 "$LOGFILE" >&2 || true
+  return 1
+}
+
+server-stop() {
+  if [ -f "$PIDFILE" ]; then
+    kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    rm -f "$PIDFILE"
+    echo "auto-research: daemon stopped"
+  else
+    echo "auto-research: not running (no pidfile)"
+  fi
+}
+
+api-post() { curl -s -m 30 -X POST -H "Authorization: Bearer $TOKEN" \
+                  -H "Content-Type: application/json" "$@"; }
+api-get()  { curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$@"; }
+
+# test seam: the launcher tests override this function
+project-http-code() {
+  curl -s -m 5 -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $TOKEN" "$API/projects/$PROJECT"
+}
+
+json-question() {
+  python3 -c 'import json,sys;print(json.dumps({"question":sys.argv[1]}))' "$1"
+}
+
+json-submit() { # question input-kind input-path
+  python3 -c 'import json,sys
+print(json.dumps({"question":sys.argv[1],
+                  "input_kind":sys.argv[2] or None,
+                  "input_path":sys.argv[3] or None}))' "$1" "${2:-}" "${3:-}"
+}
+
+resolve-invocation() { # [-p PROJECT] [FILE | question words...]
+  # Sets PROJECT, INPUT_KIND ("file"|"text"), INPUT_PATH and QUESTION.
+  PROJECT="$DEFAULT_PROJECT"
+  INPUT_KIND="text"
+  INPUT_PATH=""
+  if [ "${1:-}" = "-p" ] || [ "${1:-}" = "--project" ]; then
+    if [ $# -lt 2 ]; then
+      echo "research: -p requires a project id" >&2
+      return 1
+    fi
+    PROJECT="$2"
+    shift 2
+  fi
+  if [ $# -eq 0 ]; then
+    echo "usage: research [-p PROJECT] <file | \"question\" | topic words...>" >&2
+    return 1
+  fi
+  local files=() a
+  for a in "$@"; do
+    if [ -f "$a" ]; then files+=("$a"); fi
+  done
+  if [ ${#files[@]} -ge 1 ] && [ $# -gt 1 ]; then
+    echo "research: ambiguous invocation: '$*' names an existing file." >&2
+    echo "  use: research -p PROJECT <file>   to submit the file's text" >&2
+    echo "  or:  research \"<question>\"        for free text" >&2
+    return 1
+  fi
+  if [ ${#files[@]} -eq 1 ]; then
+    INPUT_KIND="file"
+    INPUT_PATH="$1"
+    QUESTION="$(cat "$1")"
+  else
+    INPUT_KIND="text"
+    QUESTION="$*"
+  fi
+  if [ -z "$(printf '%s' "$QUESTION" | tr -d '[:space:]')" ]; then
+    echo "research: empty question" >&2
+    return 1
+  fi
+}
+
+ensure-project() { # -> fails clearly when the project id is unknown
+  local code
+  code="$(project-http-code)"
+  case "$code" in
+    200) return 0 ;;
+    404)
+      echo "research: unknown project '$PROJECT'" >&2
+      echo "  configured projects: $(api-get "$API/projects" | python3 -c 'import sys,json
+try:
+    print(" ".join(sorted(p["id"] for p in json.load(sys.stdin)["projects"])))
+except Exception:
+    print("(unavailable)")')" >&2
+      return 1 ;;
+    *)
+      echo "research: cannot resolve project '$PROJECT' (HTTP $code)" >&2
+      return 1 ;;
+  esac
+}
+
+submit-question() { # project question -> run_id ("" on failure)
+  api-post -d "$(json-question "$2")" "$API/projects/$1/research" \
+    | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("run_id",""))
+except Exception: print("")'
+}
+
+trigger-walk() { api-post -d '{}' "$API/run-pending" > /dev/null; }
+
+run-status() {
+  api-get "$API/runs/$1" | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("status","?"))
+except Exception: print("?")'
+}
+
+watch-run() { # run-id -> final status
+  local run="$1" i st
+  for i in $(seq 1 180); do
+    st="$(run-status "$run")"
+    case "$st" in
+      completed|unresolved|failed|cancelled) echo "$st"; return 0 ;;
+    esac
+    sleep 5
+  done
+  echo "timeout" >&2; echo "still-running"
+}
+
+print-events() { # run-id [tail-n]
+  api-get "$API/runs/$1/events" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get("events", []):
+    print("  ", e.get("type","?"), (e.get("timestamp","") or e.get("at","") or "")[:19])'
+}
+
+report-candidates() { # run-id
+  api-get "$API/runs/$1/candidates" | python3 -c '
+import sys, json
+try:
+    cands = json.load(sys.stdin).get("candidates", [])
+except Exception:
+    cands = []
+for c in cands:
+    print("  candidate", c.get("id"), "[%s]" % c.get("state"),
+          (c.get("hypothesis") or "")[:100])
+if not cands:
+    print("  (no candidates)")'
+}
+
+cmd-projects() {
+  api-get "$API/projects" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for p in d.get("projects", []):
+    print(" ", p.get("id"),
+          "profile=%s" % p.get("prompt_profile"),
+          "repo=%s" % p.get("source_repository"))'
+}
+
+do-research() { # [-p PROJECT] topic...
+  if ! resolve-invocation "$@"; then return 1; fi
+  echo "project: $PROJECT"
+  echo "input-kind: $INPUT_KIND${INPUT_PATH:+ ($INPUT_PATH)}"
+  if ! ensure-project; then return 1; fi
+  echo "submitting to '$PROJECT'..."
+  local run
+  run="$(api-post -d "$(json-submit "$QUESTION" "$INPUT_KIND" "$INPUT_PATH")" \
+        "$API/projects/$PROJECT/research" \
+        | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("run_id",""))
+except Exception: print("")')"
+  if [ -z "$run" ]; then echo "submit failed" >&2; return 1; fi
+  echo "run $run queued; walking ARADR stages (events every stage)..."
+  trigger-walk
+  local status; status="$(watch-run "$run")"
+  echo "== run $run: $status =="
+  api-get "$API/runs/$run/events" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+events = d.get("events", [])
+for e in events[-10:]:
+    print("  ", e.get("type","?"), (e.get("at","") or "")[:19])'
+  report-candidates "$run"
+  echo "corpus: $CORPUS/roam/"
+}
+
+cmd-runs() {
+  api-get "$API/runs" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for r in d.get("runs", []):
+    print(" ", r.get("id"), r.get("status"))'
+}
+
+cmd-approve() { # path STATE evidence
+  api-post -d "{\"state\":\"$2\",\"evidence\":\"$3\"}" \
+           "$API/artifacts/$1/approval"; echo
+}
+
+cmd-promote() { # candidate-id evidence architecture
+  api-post -d "{\"candidate_id\":\"$1\",\"scores\":{\"evidence\":$2,\"architecture\":$3}}" \
+           "$API/candidates/$1/promote"; echo
+}
+
+repl() {
+  echo "auto-research REPL — project '$DEFAULT_PROJECT' on $API (h for help)"
+  while true; do
+    printf 'research> '
+    IFS= read -r line || { echo; break; }
+    set -- $line
+    cmd="${1:-}"; shift || true
+    case "$cmd" in
+      ""|\#) continue ;;
+      q|quit|exit) break ;;
+      h|help)
+        sed -n '2,30p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+        ;;
+      r|research)
+        do-research "$@" ;;
+      runs) cmd-runs ;;
+      projects) cmd-projects ;;
+      s|status)
+        echo "  $(run-status "$1")"
+        report-candidates "$1" ;;
+      e|events) print-events "$1" ;;
+      o|open) "${PAGER:-less}" "$CORPUS/$1" ;;
+      approve) cmd-approve "$1" "$2" "$3" ;;
+      promote) cmd-promote "$1" "$2" "$3" ;;
+      stop) server-stop ;;
+      logs) tail -40 "$LOGFILE" ;;
+      *) echo "unknown: $cmd (h for help)" ;;
+    esac
+  done
+}
+
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
+
+main() {
+  load-env
+  DEFAULT_PROJECT="${AR_DEFAULT_PROJECT:-auto-research}"
+  case "${1:-}" in
+    start) server-start ;;
+    stop) server-stop ;;
+    restart) server-stop; server-start ;;
+    logs) tail -f "${LOGFILE:-$HOME/.cache/auto-research/daemon.log}" ;;
+    projects) cmd-projects ;;
+    repl) server-start; repl ;;
+    -h|--help|help|usage) usage ;;
+    *) server-start; do-research "$@" ;;
+  esac
+}
+
+# test seam: sourcing with AR_RESEARCH_LIB_ONLY=1 defines the functions
+# without executing main
+if [ -z "${AR_RESEARCH_LIB_ONLY:-}" ]; then
+  main "$@"
+fi

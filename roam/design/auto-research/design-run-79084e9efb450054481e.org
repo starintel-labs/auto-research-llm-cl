@@ -1,0 +1,51 @@
+:PROPERTIES:
+:ID:       starintel-431f74d757a9cc126044cbfd08986539
+:END:
+#+title: Design run-79084e9efb450054481e
+#+description: Design note for run run-79084e9efb450054481e of project auto-research.
+#+status: DRAFT
+#+filetags: :starintel:design:auto-research:draft:
+#+todo: DRAFT REVIEW | DONE REJECTED
+
+* Objective
+
+Design Note for Project auto-research, Run run-79084e9efb450054481e
+
+Invariants:
+- The system must autonomously conduct research tasks with minimal human intervention.
+- Research outputs must be verifiable and reproducible.
+- Data privacy and ethical guidelines must be strictly adhered to.
+
+Actors:
+- Autonomous Research Agent: Executes research tasks, gathers data, and synthesizes findings.
+- User/Researcher: Defines research goals, reviews outputs, and provides feedback.
+- Data Sources: External databases, publications, and repositories accessed by the agent.
+- System Administrator: Maintains system integrity and updates.
+
+Rejected Alternatives:
+- Fully manual research process due to inefficiency and scalability issues.
+- Purely heuristic-based research without data-driven validation due to lack of rigor.
+- Open-ended research without defined invariants leading to inconsistent results.
+
+This design ensures a balance between autonomy, reliability, and ethical compliance in the auto-research system.
+
+* Approval Table
+
+| Approval area | Required authority | State | Evidence required | Evidence reference |
+|---------------+--------------------+-------+-------------------+--------------------|
+| Research basis | Research reviewer | NOT APPLICABLE | Design note follows the recorded research basis | Linked research node |
+| Architecture | Project maintainer | PENDING | Design review and resolved contradictions | |
+| Security | Security reviewer | PENDING | Authorization, disclosure, and secret-handling review | |
+| Operations | Operator | PENDING | Operational policy, budgets, monitoring, and rollback review | |
+| Implementation | Repository maintainer | NOT STARTED | Passing implementation, CI, and publication checks | |
+
+* Changelog
+
+| Date | Change | Author or actor | Evidence |
+|------+--------+-----------------+----------|
+| 2026-09-04 | Design node created by the Auto Research runtime | auto-research-runtime | runtime design stage |
+
+* Footnotes and Glossary
+
+- *Invariant* — A condition the design must preserve across every valid execution path.
+- *Actor* — An independently stateful component that processes messages through a defined protocol.
