@@ -94,6 +94,39 @@ project-http-code() { echo 000; }
 ensure-project 2>/dev/null
 check "unreachable API fails closed" $([ $? -ne 0 ]; echo $?)
 
+# ---- 6. explicit process environment wins over corpus .env --------------------
+ORIGINAL_CORPUS="$CORPUS"
+CORPUS="$TMP/corpus"
+mkdir -p "$CORPUS"
+cat > "$CORPUS/.env" <<'EOF'
+export AR_MODEL=from-corpus
+export OPENROUTER_API_KEY=corpus-key
+export AR_WEB_PORT=8080
+export AR_OPERATOR_TOKEN=corpus-token
+export AR_RUNTIME_SOURCE=/corpus/runtime
+export AR_PIDFILE=/corpus/daemon.pid
+export AR_LOGFILE=/corpus/daemon.log
+EOF
+
+export AR_MODEL=z-ai/glm-5.3-flash
+export OPENROUTER_API_KEY=caller-key
+export AR_WEB_PORT=18080
+export AR_OPERATOR_TOKEN=caller-token
+export AR_RUNTIME_SOURCE=/caller/runtime
+export AR_PIDFILE="$TMP/caller.pid"
+export AR_LOGFILE="$TMP/caller.log"
+load-env
+check "caller model overrides corpus .env" $([ "$AR_MODEL" = "z-ai/glm-5.3-flash" ]; echo $?)
+check "caller OpenRouter key overrides corpus .env" $([ "$OPENROUTER_API_KEY" = "caller-key" ]; echo $?)
+check "caller port overrides corpus .env" $([ "$PORT" = "18080" ]; echo $?)
+check "caller operator token overrides corpus .env" $([ "$TOKEN" = "caller-token" ]; echo $?)
+check "caller runtime source overrides corpus .env" $([ "$AR_RUNTIME_SOURCE" = "/caller/runtime" ]; echo $?)
+check "caller pidfile isolates launcher" $([ "$PIDFILE" = "$TMP/caller.pid" ]; echo $?)
+check "caller logfile isolates launcher" $([ "$LOGFILE" = "$TMP/caller.log" ]; echo $?)
+
+CORPUS="$ORIGINAL_CORPUS"
+unset AR_MODEL OPENROUTER_API_KEY AR_WEB_PORT AR_OPERATOR_TOKEN AR_RUNTIME_SOURCE AR_PIDFILE AR_LOGFILE
+
 # ---- summary ------------------------------------------------------------------
 echo "launcher tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
