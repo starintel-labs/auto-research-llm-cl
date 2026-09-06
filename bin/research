@@ -29,14 +29,37 @@
 set -euo pipefail
 
 CORPUS="${AR_CORPUS_ROOT:-$HOME/starintel/auto-research-llm-cl}"
-PIDFILE="$HOME/.cache/auto-research/daemon.pid"
-LOGFILE="$HOME/.cache/auto-research/daemon.log"
+PIDFILE=""
+LOGFILE=""
 DEFAULT_PROJECT="${AR_DEFAULT_PROJECT:-auto-research}"
 
 load-env() {
+  # A caller such as the benchmark lab must be able to force provider/model
+  # settings without mutating the corpus .env.  The corpus file remains the
+  # default source; explicit process environment values win for the fields
+  # that define runtime identity and isolation.
+  local caller_ar_model="${AR_MODEL-}"
+  local caller_openrouter_api_key="${OPENROUTER_API_KEY-}"
+  local caller_ar_web_port="${AR_WEB_PORT-}"
+  local caller_ar_operator_token="${AR_OPERATOR_TOKEN-}"
+  local caller_ar_runtime_source="${AR_RUNTIME_SOURCE-}"
+  local caller_ar_pidfile="${AR_PIDFILE-}"
+  local caller_ar_logfile="${AR_LOGFILE-}"
+
   if [ -f "$CORPUS/.env" ]; then set -a; . "$CORPUS/.env"; set +a; fi
+
+  if [ -n "$caller_ar_model" ]; then export AR_MODEL="$caller_ar_model"; fi
+  if [ -n "$caller_openrouter_api_key" ]; then export OPENROUTER_API_KEY="$caller_openrouter_api_key"; fi
+  if [ -n "$caller_ar_web_port" ]; then export AR_WEB_PORT="$caller_ar_web_port"; fi
+  if [ -n "$caller_ar_operator_token" ]; then export AR_OPERATOR_TOKEN="$caller_ar_operator_token"; fi
+  if [ -n "$caller_ar_runtime_source" ]; then export AR_RUNTIME_SOURCE="$caller_ar_runtime_source"; fi
+  if [ -n "$caller_ar_pidfile" ]; then export AR_PIDFILE="$caller_ar_pidfile"; fi
+  if [ -n "$caller_ar_logfile" ]; then export AR_LOGFILE="$caller_ar_logfile"; fi
+
   PORT="${AR_WEB_PORT:-8080}"
   TOKEN="${AR_OPERATOR_TOKEN:-dev-operator-token}"
+  PIDFILE="${AR_PIDFILE:-$HOME/.cache/auto-research/daemon.pid}"
+  LOGFILE="${AR_LOGFILE:-$HOME/.cache/auto-research/daemon.log}"
   API="http://127.0.0.1:$PORT/api/v1"
 }
 
@@ -45,8 +68,12 @@ server-up() { curl -s -m 2 -o /dev/null "$API/health"; }
 server-start() {
   if server-up; then return 0; fi
   mkdir -p "$(dirname "$PIDFILE")"
-  echo "auto-research: starting daemon (corpus $CORPUS)..."
-  ( cd "$CORPUS" && set -a && . ./.env 2>/dev/null; set +a
+  mkdir -p "$(dirname "$LOGFILE")"
+  echo "auto-research: starting daemon (corpus $CORPUS, model ${AR_MODEL:-unset})..."
+  # load-env already sourced corpus defaults and exported them.  Do not source
+  # .env again here: doing so would silently overwrite caller-selected model,
+  # provider, port, token, or runtime-source values.
+  ( cd "$CORPUS"
     nohup sbcl --noinform --script scripts/start.lisp >> "$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE" )
   local i
@@ -297,7 +324,7 @@ main() {
     start) server-start ;;
     stop) server-stop ;;
     restart) server-stop; server-start ;;
-    logs) tail -f "${LOGFILE:-$HOME/.cache/auto-research/daemon.log}" ;;
+    logs) tail -f "$LOGFILE" ;;
     projects) cmd-projects ;;
     repl) server-start; repl ;;
     -h|--help|help|usage) usage ;;
