@@ -219,8 +219,10 @@ report-candidates() { # run-id
   api-get "$API/runs/$1/candidates" | python3 -c '
 import sys, json
 try:
-    cands = json.load(sys.stdin).get("candidates", [])
+    cands = json.load(sys.stdin).get("candidates", []) or []
 except Exception:
+    cands = []
+if not isinstance(cands, list):
     cands = []
 for c in cands:
     print("  candidate", c.get("id"), "[%s]" % c.get("state"),
@@ -259,7 +261,9 @@ except Exception: print("")')"
   api-get "$API/runs/$run/events" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
-events = d.get("events", [])
+events = d.get("events", []) or []
+if not isinstance(events, list):
+    events = []
 for e in events[-10:]:
     print("  ", e.get("type","?"), (e.get("at","") or "")[:19])'
   report-candidates "$run"
